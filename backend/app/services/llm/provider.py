@@ -1,0 +1,127 @@
+import asyncio
+import json
+from typing import Protocol, Type
+
+import httpx
+from pydantic import BaseModel
+
+from app.core.config import get_settings
+
+
+class LLMProvider(Protocol):
+    async def complete(self, messages: list[dict], *, json_schema=None, temperature: float = 0.2) -> str: ...
+    async def structured(self, messages: list[dict], schema: Type[BaseModel], temperature: float = 0.2) -> BaseModel: ...
+
+
+_semaphore: asyncio.Semaphore | None = None
+
+
+def _sem() -> asyncio.Semaphore:
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(get_settings().llm_max_concurrency)
+    return _semaphore
+
+
+class GroqProvider:
+    def __init__(self, api_key: str, model: str):
+        self.api_key = api_key
+        self.model = model
+
+    async def complete(self, messages: list[dict], *, json_schema=None, temperature: float = 0.2) -> str:
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if json_schema is not None:
+            payload["response_format"] = {"type": "json_object"}
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        async with _sem():
+            last_error = None
+            for _ in range(2):
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        response = await client.post(
+                            "https://api.groq.com/openai/v1/chat/completions",
+                            headers=headers,
+                            json=payload,
+                        )
+                        if response.status_code == 429:
+                            last_error = RuntimeError("LLM rate limited")
+                            await asyncio.sleep(1.5)
+                            continue
+                        response.raise_for_status()
+                        data = response.json()
+                        return data["choices"][0]["message"]["content"]
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                    await asyncio.sleep(0.5)
+            raise RuntimeError(str(last_error) if last_error else "LLM request failed")
+
+    async def structured(self, messages: list[dict], schema: Type[BaseModel], temperature: float = 0.2) -> BaseModel:
+        schema_hint = json.dumps(schema.model_json_schema())
+        prompted = messages + [
+            {"role": "system", "content": f"Respond with JSON matching this schema: {schema_hint}"}
+        ]
+        raw = await self.complete(prompted, json_schema=schema, temperature=temperature)
+        try:
+            return schema.model_validate_json(raw)
+        except Exception:
+            raw2 = await self.complete(prompted, json_schema=schema, temperature=0)
+            return schema.model_validate_json(raw2)
+
+
+class HeuristicProvider:
+    """Offline extractive fallback when no API key is configured."""
+
+    async def complete(self, messages: list[dict], *, json_schema=None, temperature: float = 0.2) -> str:
+        return messages[-1]["content"][:4000]
+
+    async def structured(self, messages: list[dict], schema: Type[BaseModel], temperature: float = 0.2) -> BaseModel:
+        from app.services.llm.heuristic import build_heuristic
+
+        return build_heuristic(schema, messages)
+
+
+def get_provider() -> LLMProvider:
+    settings = get_settings()
+    if settings.llm_api_key and settings.llm_provider in {"groq", "openai", "mistral", "gemini"}:
+        if settings.llm_provider == "groq":
+            return GroqProvider(settings.llm_api_key, settings.llm_model)
+        if settings.llm_provider == "openai":
+            return OpenAICompatibleProvider(
+                settings.llm_api_key,
+                settings.llm_model,
+                "https://api.openai.com/v1/chat/completions",
+            )
+        if settings.llm_provider == "mistral":
+            return OpenAICompatibleProvider(
+                settings.llm_api_key,
+                settings.llm_model,
+                "https://api.mistral.ai/v1/chat/completions",
+            )
+        if settings.llm_provider == "gemini":
+            return OpenAICompatibleProvider(
+                settings.llm_api_key,
+                settings.llm_model,
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            )
+    return HeuristicProvider()
+
+
+class OpenAICompatibleProvider(GroqProvider):
+    def __init__(self, api_key: str, model: str, endpoint: str):
+        super().__init__(api_key, model)
+        self.endpoint = endpoint
+
+    async def complete(self, messages: list[dict], *, json_schema=None, temperature: float = 0.2) -> str:
+        payload = {"model": self.model, "messages": messages, "temperature": temperature}
+        if json_schema is not None:
+            payload["response_format"] = {"type": "json_object"}
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        async with _sem():
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(self.endpoint, headers=headers, json=payload)
+                response.raise_for_status()
+                return response.json()["choices"][0]["message"]["content"]

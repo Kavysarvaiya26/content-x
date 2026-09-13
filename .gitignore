@@ -1,0 +1,51 @@
+# .env
+# .venv/
+# venv/
+# __pycache__/
+# *.py[cod]
+# .pytest_cache/
+# .mypy_cache/
+# backend/data/
+# backend/.env
+# frontend/node_modules/
+# frontend/.next/
+# frontend/out/
+# *.db
+# *.sqlite
+# .DS_Store
+# Thumbs.db
+# uploads/
+# *.pptx
+# !frontend/public/**
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploads / generated data
+backend/data/uploads/
+backend/data/*.db
+
+# Node
+node_modules/
+.next/
+out/
+
+# Logs
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

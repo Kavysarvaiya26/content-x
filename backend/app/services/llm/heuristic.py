@@ -110,17 +110,20 @@ def _knowledge_from_chunks(payload: dict) -> CanonicalKnowledge:
     # 1. Extract Document Title
     title = payload.get("title")
     if not title or title == "Untitled source":
+        # Try explicit Title: pattern
         title_match = re.search(r"(?:Incident\s+)?Title:\s*([^\n]+)", text, re.IGNORECASE)
         if title_match:
             title = title_match.group(1).strip()
-        elif lines:
-            candidate = lines[0].strip()
-            if candidate.upper() in {"CYBERSECURITY INCIDENT ASSESSMENT", "INCIDENT REPORT", "ASSESSMENT REPORT"} and len(lines) > 1:
-                title = lines[1].replace("Incident Title:", "").strip()
-            else:
-                title = candidate
         else:
-            title = "Security Incident Assessment"
+            # Fallback: use first non-empty line that looks like a title and is not a generic heading
+            for line in lines:
+                stripped = line.strip()
+                if stripped and len(stripped.split()) <= 12 and not stripped.isupper():
+                    if stripped.upper() not in {"CYBERSECURITY INCIDENT ASSESSMENT", "INCIDENT REPORT", "ASSESSMENT REPORT"}:
+                        title = stripped
+                        break
+            else:
+                title = "Security Incident Assessment"
 
     # 2. Extract Executive Brief / Summary
     summary_match = re.search(r"Summary:\s*([^\n]+(?:\n[^\n]+)*?)(?=\n\s*\n|\n[A-Z][A-Za-z\s]+:)", text, re.IGNORECASE)
@@ -231,31 +234,29 @@ def _advisory(k: CanonicalKnowledge, r: FactRegistry) -> Advisory:
         watch_items=watch_items,
         caveats=caveats,
         fact_keys_used=_fact_keys(r),
-    )
-
+       )
 
 def _linkedin(k: CanonicalKnowledge, r: FactRegistry) -> LinkedInPost:
-    hook = f"[SECURITY BRIEF]: {k.title}" if k.title else "[SECURITY INCIDENT BRIEFING]"
-    
-    findings_str = "\n".join(f"- {p}" for p in k.key_points[:4]) if k.key_points else k.executive_brief
-    recs_str = "\n".join(f"- {r_item}" for r_item in k.recommendations[:3]) if k.recommendations else ""
-    
-    body = (
-        f"{k.executive_brief}\n\n"
-        f"KEY INCIDENT FINDINGS:\n{findings_str}"
-    )
-    if recs_str:
-        body += f"\n\nRECOMMENDED ACTIONS:\n{recs_str}"
+    # Hook: concise title without brackets
+    hook = k.title if k.title else "Security Incident Brief"
+
+    # Build a natural narrative paragraph
+    parts: list[str] = []
+    if k.executive_brief:
+        parts.append(k.executive_brief)
+    if k.key_points:
+        parts.append(" ".join(k.key_points[:3]))
+    if k.recommendations:
+        parts.append(k.recommendations[0].rstrip('.'))
+    body = " ".join(parts).strip()
 
     return LinkedInPost(
         hook=hook,
         body=body[:1300],
         hashtags=["#Cybersecurity", "#IncidentResponse", "#TransformAI", "#InfoSec"],
-        cta="Review system authentication logs and enforce multi-factor authentication across all privileged access vectors.",
+        cta="Review authentication logs and enforce multi-factor authentication for privileged accounts.",
         fact_keys_used=_fact_keys(r),
     )
-
-
 def _presentation(k: CanonicalKnowledge, r: FactRegistry) -> PresentationOutline:
     slides = [
         Slide(
@@ -304,20 +305,43 @@ def _presentation(k: CanonicalKnowledge, r: FactRegistry) -> PresentationOutline
 
 
 def _xthread(k: CanonicalKnowledge, r: FactRegistry) -> XThread:
-    tweets = [
-        XTweet(index=1, text=f"THREAD: {k.title}\n\n1/ {k.executive_brief[:220]}...")
-    ]
+    tweets = []
+    # Tweet 1 – hook with title and concise context
+    hook = k.title if k.title else "Security Incident"
+    intro = k.executive_brief if k.executive_brief else "An incident was reported."
+    tweets.append(
+        XTweet(index=1, text=f"{hook}: {intro[:260]}")
+    )
+    # Tweet 2 – core event description using first key point
     if k.key_points:
-        for i, pt in enumerate(k.key_points[:4], start=2):
-            tweets.append(XTweet(index=i, text=f"{i}/ Key Finding: {pt[:240]}"))
-    if k.recommendations:
-        idx = len(tweets) + 1
         tweets.append(
-            XTweet(
-                index=idx,
-                text=f"{idx}/ Action Plan: {k.recommendations[0][:230]}",
-            )
+            XTweet(index=2, text=k.key_points[0][:260])
         )
+    # Tweet 3 – additional observations (next key points)
+    if len(k.key_points) > 1:
+        additional = " ".join(k.key_points[1:3])
+        tweets.append(
+            XTweet(index=3, text=additional[:260])
+        )
+    # Tweet 4 – impact metrics woven naturally
+    metrics_parts = []
+    if k.statistics:
+        metrics_parts.append(", ".join(k.statistics[:2]))
+    if k.dates:
+        metrics_parts.append(", ".join(k.dates[:2]))
+    if metrics_parts:
+        tweets.append(
+            XTweet(index=4, text=f"{', '.join(metrics_parts)[:260]}")
+        )
+    # Tweet 5 – recommendation narrative
+    if k.recommendations:
+        tweets.append(
+            XTweet(index=5, text=k.recommendations[0][:260])
+        )
+    # Tweet 6 – concluding call to action
+    tweets.append(
+        XTweet(index=6, text="Stay vigilant and continue monitoring for any further activity.")
+    )
     return XThread(tweets=tweets, fact_keys_used=_fact_keys(r))
 
 

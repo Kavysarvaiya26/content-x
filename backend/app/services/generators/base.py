@@ -13,12 +13,19 @@ class BaseGenerator:
     schema: Type[BaseModel]
 
     def system_prompt(self) -> str:
-        return (
+        # Base instruction common to all generators
+        base = (
             "You transform canonical structured knowledge into one communication deliverable. "
             "Use only FactRegistry values for numbers, dates, and names. "
             "Never invent facts. If something is listed under unknowns or prohibited assumptions, omit it. "
             "Return JSON only."
         )
+        # Append any subclass‑specific guidelines if they exist
+        if getattr(self, "output_guidelines", []):
+            guidelines = " ".join(self.output_guidelines)
+            return f"{base} {guidelines}"
+        return base
+
 
     def build_messages(
         self,
